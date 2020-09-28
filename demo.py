@@ -1,4 +1,5 @@
 import argparse
+import time
 
 import cv2
 import numpy as np
@@ -6,6 +7,7 @@ import pyrealsense2 as rs
 import torch
 from openvino.inference_engine import IECore
 
+from fps import FPS
 from models.with_mobilenet import PoseEstimationWithMobileNet
 from modules.keypoints import extract_keypoints, group_keypoints
 from modules.load_state import load_state
@@ -107,24 +109,37 @@ def run_demo(net, height_size, cpu, track, smooth, image_provider=None, use_real
     if use_realsense_cam:
         pipeline = init_realsense()
 
+    # FPS INITIALIZATION ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # initialize fps counting
+    frame_count = 0  # counts every 15 frames
+    fps_update_rate = 15  # 1 # the interval (of frames) at which the fps is updated
+    fps_deque_size = 2  # 5
+    fps = FPS(deque_size=fps_deque_size, update_rate=fps_update_rate)
+    curr_fps = 0
+
     stride = 8
     upsample_ratio = 4
     num_keypoints = Pose.num_kpts
     previous_poses = []
-    delay = 33
+    delay = 1  # 33
     while True:
 
         # get frame from source provided
+        start_get_frame = time.time()
         if use_realsense_cam:
             frames = pipeline.wait_for_frames()
             color_frame = frames.get_color_frame()
             img = np.asanyarray(color_frame.get_data())
         else:
             img = next(image_provider)
+        end_get_frame = time.time()
 
+        start_infer = time.time()
         orig_img = img.copy()
         heatmaps, pafs, scale, pad = infer_fast(net, img, height_size, stride, upsample_ratio, cpu, openvino=openvino)
+        end_infer = time.time()
 
+        start_post_process = time.time()
         total_keypoints_num = 0
         all_keypoints_by_type = []
         for kpt_idx in range(num_keypoints):  # 19th for bg
@@ -158,6 +173,23 @@ def run_demo(net, height_size, cpu, track, smooth, image_provider=None, use_real
             if track:
                 cv2.putText(img, 'id: {}'.format(pose.id), (pose.bbox[0], pose.bbox[1] - 16),
                             cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255))
+
+        # compute fps
+        if frame_count == fps_update_rate:
+            frame_count = 0
+            fps.update()
+            curr_fps = fps.fps()
+
+        # draw fps on image
+        cv2.putText(
+            img, str(int(curr_fps)),
+            (0, 15), cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.7, color=(0, 255, 0), thickness=2
+        )
+        frame_count += 1
+
+        end_post_process = time.time()
+
+        start_imshow = time.time()
         cv2.imshow('Lightweight Human Pose Estimation Python Demo', img)
         key = cv2.waitKey(delay)
         if key == 27:  # esc
@@ -167,7 +199,14 @@ def run_demo(net, height_size, cpu, track, smooth, image_provider=None, use_real
                 delay = 0
             else:
                 delay = 33
+        end_imshow = time.time()
 
+        time_get_frame = end_get_frame - start_get_frame
+        time_infer = end_infer - start_infer
+        time_post_process = end_post_process - start_post_process
+        time_imshow = end_imshow - start_imshow
+        time_total = end_imshow - start_get_frame
+        print(f'TIME: get frame: {time_get_frame:.4f} ({time_get_frame / time_total:.2f}%), infer: {time_infer:.4f} ({time_infer / time_total:.2f}%), pp: {time_post_process:.4f} ({time_post_process / time_total:.2f}%), imshow: {time_imshow:.4f} ({time_imshow / time_total:.2f}%)')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
